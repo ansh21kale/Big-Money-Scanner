@@ -8,22 +8,11 @@ OPTION_CHAIN_URL = (
     "https://api.upstox.com/v2/option/chain"
 )
 
-AUTHORIZE_URL = (
-    "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-)
-
 
 UNDERLYINGS = {
     "NIFTY": "NSE_INDEX|Nifty 50",
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
 }
-
-
-def auth_headers(access_token):
-    return {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {access_token}",
-    }
 
 
 def option_chain(
@@ -39,10 +28,15 @@ def option_chain(
 
     response = requests.get(
         OPTION_CHAIN_URL,
-        headers=auth_headers(access_token),
+        headers={
+            "Accept": "application/json",
+            "Authorization":
+                f"Bearer {access_token}",
+        },
         params={
             "instrument_key":
                 UNDERLYINGS[underlying],
+
             "expiry_date":
                 expiry,
         },
@@ -62,41 +56,6 @@ def option_chain(
         "data",
         []
     )
-
-
-def get_authorized_ws_url(
-    access_token
-):
-
-    response = requests.get(
-        AUTHORIZE_URL,
-        headers=auth_headers(access_token),
-        timeout=20,
-    )
-
-    response.raise_for_status()
-
-    payload = response.json()
-
-    if payload.get("status") != "success":
-        raise RuntimeError(
-            f"WebSocket authorization failed: "
-            f"{payload}"
-        )
-
-    data = payload.get("data") or {}
-
-    url = data.get(
-        "authorized_redirect_uri"
-    )
-
-    if not url:
-        raise RuntimeError(
-            "Upstox did not return "
-            "authorized_redirect_uri"
-        )
-
-    return url
 
 
 def build_contract_metadata(
@@ -198,12 +157,6 @@ def make_streamer(
     access_token
 ):
 
-    # First obtain the authorized V3
-    # WebSocket URL.
-    ws_url = get_authorized_ws_url(
-        access_token
-    )
-
     configuration = (
         upstox_client.Configuration()
     )
@@ -212,22 +165,12 @@ def make_streamer(
         access_token
     )
 
-    client = upstox_client.ApiClient(
-        configuration
-    )
-
-    streamer = (
+    return (
         upstox_client.MarketDataStreamerV3(
-            client,
+            upstox_client.ApiClient(
+                configuration
+            ),
             [],
             "full",
         )
-    )
-
-    # Store the authorized URL so that
-    # main.py can inspect it if required.
-    streamer.authorized_ws_url = (
-        ws_url
-    )
-
-    return streamer
+        )
