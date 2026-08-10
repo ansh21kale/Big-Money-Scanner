@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Big Money Scanner</title>
+<style>
+body{font-family:Arial,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
+header{padding:18px;background:#161b22;position:sticky;top:0}
+h1{font-size:22px;margin:0 0 5px}
+small{color:#8b949e}
+.tabs{display:flex;gap:8px;padding:12px;overflow:auto}
+button{padding:10px 16px;border:0;border-radius:8px;background:#21262d;color:#fff}
+button.active{background:#238636}
+#cards{padding:10px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:14px;margin-bottom:10px}
+.row{display:flex;justify-content:space-between;gap:8px}
+.score{font-size:24px;font-weight:bold}
+.badge{padding:5px 8px;border-radius:6px;background:#21262d}
+.green{color:#3fb950}.red{color:#f85149}.yellow{color:#d29922}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.metric{background:#0d1117;padding:8px;border-radius:7px}
+</style>
+</head>
+<body>
+<header>
+<h1>💰 Big Money Scanner</h1>
+<small id="status">Connecting...</small>
+</header>
+<div class="tabs">
+<button id="nifty" class="active" onclick="show('NIFTY')">NIFTY</button>
+<button id="bank" onclick="show('BANKNIFTY')">BANKNIFTY</button>
+</div>
+<div id="cards"></div>
+<script>
+let current='NIFTY', data={};
+function show(x){current=x;document.querySelectorAll('button').forEach(b=>b.classList.remove('active'));document.getElementById(x==='NIFTY'?'nifty':'bank').classList.add('active');render();}
+function money(x){return '₹'+Number(x).toFixed(2)+' Cr'}
+function render(){
+ const cards=document.getElementById('cards');
+ const rows=(data[current]||[]).filter(x=>x.label!=='NORMAL').slice(0,30);
+ if(!rows.length){cards.innerHTML='<div class="card">No Big Money activity detected yet.</div>';return;}
+ cards.innerHTML=rows.map(x=>`
+ <div class="card">
+  <div class="row"><b>${x.underlying} ${x.strike} ${x.side}</b><span class="score">${x.score}</span></div>
+  <div class="row"><span>${x.label}</span><span class="${x.signal.includes('SHORT')||x.signal.includes('UNWIND')?'red':'green'}">${x.signal}</span></div>
+  <div class="grid">
+   <div class="metric">Money<br><b>${money(x.money_flow_cr)}</b></div>
+   <div class="metric">Volume Spike<br><b>${x.volume_spike}x</b></div>
+   <div class="metric">OI Change<br><b>${x.oi_change_pct}%</b></div>
+   <div class="metric">LTP<br><b>₹${x.ltp}</b></div>
+  </div>
+ </div>`).join('');
+}
+async function poll(){
+ try{
+  const r=await fetch('/api/status'); const j=await r.json(); data={NIFTY:j.nifty,BANKNIFTY:j.banknifty};
+  document.getElementById('status').textContent=j.configured?'🟢 Live scanner':'🟠 Add UPSTOX_ACCESS_TOKEN in .env';
+  render();
+ }catch(e){document.getElementById('status').textContent='🔴 Server error'}
+}
+poll(); setInterval(poll,5000);
+</script>
+</body>
+</html>
