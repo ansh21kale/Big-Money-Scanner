@@ -3,3 +3,5 @@ uvicorn[standard]
 python-dotenv
 requests
 upstox-python-sdk
+websocket-client
+protobuf
