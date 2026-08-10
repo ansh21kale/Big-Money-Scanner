@@ -1,90 +1,330 @@
+from __future__ import annotations
+
 import os
-import time
 import threading
-from collections import defaultdict, deque
-from pathlib import Path
+import time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from upstox import option_chain
-from engine import Contract, score_contract
+from engine import ContractState, score_state
+from upstox import option_chain, build_contract_metadata, make_streamer
 
 load_dotenv()
 
 TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN", "")
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "10"))
+MIN_MONEY_CR = float(os.getenv("MIN_MONEY_CR", "10"))
+MAX_CONTRACTS = int(os.getenv("MAX_CONTRACTS", "1400"))
 
-app = FastAPI(title="Big Money Scanner V1")
+app = FastAPI(title="Big Money Scanner Live V2")
 
-history = defaultdict(lambda: deque(maxlen=20))
+states = {}
+metadata = {}
 latest = {"NIFTY": [], "BANKNIFTY": []}
 errors = []
-lock = threading.Lock()
+connection = {"status": "starting", "last_message": None}
+lock = threading.RLock()
+streamer = None
 
-def build_rows(name, data):
-    rows = []
-    for item in data:
-        for side, key in [("CE", "call_options"), ("PE", "put_options")]:
-            opt = item.get(key) or {}
-            md = opt.get("market_data") or {}
-            if not md.get("ltp") or not opt.get("instrument_key"):
-                continue
-            c = Contract(
-                instrument_key=opt["instrument_key"],
-                strike=float(item.get("strike_price", 0)),
-                side=side,
-                ltp=float(md.get("ltp", 0)),
-                prev_ltp=float(md.get("close_price", md.get("ltp", 0)) or 0),
-                volume=float(md.get("volume", 0) or 0),
-                oi=float(md.get("oi", 0) or 0),
-                prev_oi=float(md.get("prev_oi", 0) or 0),
-                bid=float(md.get("bid_price", 0) or 0),
-                ask=float(md.get("ask_price", 0) or 0),
-                bid_qty=float(md.get("bid_qty", 0) or 0),
-                ask_qty=float(md.get("ask_qty", 0) or 0),
+
+def add_error(err):
+    with lock:
+        errors.append(str(err))
+        del errors[:-10]
+
+
+def extract_tick(feed):
+    if not isinstance(feed, dict):
+        return None
+
+    full = feed.get("fullFeed") or {}
+    full = (
+        full.get("marketFF")
+        or feed.get("firstLevelWithGreeks")
+        or {}
+    )
+
+    ltpc = full.get("ltpc") or {}
+    level = full.get("marketLevel") or {}
+    quotes = level.get("bidAskQuote") or []
+    first = quotes[0] if quotes else {}
+
+    greeks = full.get("optionGreeks") or {}
+
+    ohlcs = (full.get("marketOHLC") or {}).get("ohlc") or []
+    daily = next(
+        (x for x in ohlcs if x.get("interval") == "1d"),
+        {}
+    )
+
+    return {
+        "ltp": float(ltpc.get("ltp") or 0),
+        "volume": float(
+            full.get("vtt")
+            or daily.get("vol")
+            or 0
+        ),
+        "oi": float(full.get("oi") or 0),
+        "bid": float(first.get("bidP") or 0),
+        "ask": float(first.get("askP") or 0),
+        "bid_qty": float(first.get("bidQ") or 0),
+        "ask_qty": float(first.get("askQ") or 0),
+        "delta": float(greeks.get("delta") or 0),
+        "iv": float(greeks.get("iv") or 0),
+    }
+
+
+def refresh():
+    with lock:
+        grouped = {
+            "NIFTY": [],
+            "BANKNIFTY": []
+        }
+
+        for s in states.values():
+            if s.ltp > 0:
+                grouped[s.underlying].append(
+                    score_state(s, MIN_MONEY_CR)
+                )
+
+        for name in grouped:
+            grouped[name].sort(
+                key=lambda x: x["score"],
+                reverse=True
             )
-            h = history[c.instrument_key]
-            h.append(c.volume)
-            avg = sum(h) / len(h) if len(h) > 1 else None
-            row = score_contract(c, avg)
-            row["underlying"] = name
-            row["spot"] = item.get("underlying_spot_price")
-            row["expiry"] = item.get("expiry")
-            rows.append(row)
-    return sorted(rows, key=lambda x: x["score"], reverse=True)
+            latest[name] = grouped[name][:150]
 
-def worker():
-    global latest
+
+def on_message(message):
+    if not isinstance(message, dict):
+        return
+
+    if message.get("type") != "live_feed":
+        return
+
+    now = time.time()
+
+    with lock:
+        connection["last_message"] = now
+
+        for key, feed in (message.get("feeds") or {}).items():
+
+            meta = metadata.get(key)
+
+            if not meta:
+                continue
+
+            tick = extract_tick(feed)
+
+            if not tick or tick["ltp"] <= 0:
+                continue
+
+            s = states.get(key)
+
+            if not s:
+                s = ContractState(
+                    instrument_key=key,
+                    underlying=meta["underlying"],
+                    strike=meta["strike"],
+                    side=meta["side"],
+                    expiry=meta["expiry"],
+                    prev_oi=meta["prev_oi"],
+                    close_price=meta["close_price"],
+                )
+
+                states[key] = s
+
+            s.update(
+                **tick,
+                ts=now
+            )
+
+    refresh()
+
+
+def on_open():
+    connection["status"] = "connected"
+
+
+def on_close():
+    connection["status"] = "closed"
+
+
+def on_error(err):
+    connection["status"] = "error"
+    add_error(err)
+
+
+def build_universe():
+
+    combined = {}
+
+    for name in ("NIFTY", "BANKNIFTY"):
+
+        combined.update(
+            build_contract_metadata(
+                option_chain(
+                    TOKEN,
+                    name,
+                    "current_week"
+                ),
+                name
+            )
+        )
+
+    if len(combined) > MAX_CONTRACTS:
+
+        keys = sorted(
+            combined,
+            key=lambda k:
+                combined[k].get(
+                    "chain_volume",
+                    0
+                ),
+            reverse=True
+        )[:MAX_CONTRACTS]
+
+        combined = {
+            k: combined[k]
+            for k in keys
+        }
+
+    with lock:
+        metadata.clear()
+        metadata.update(combined)
+
+    return list(combined)
+
+
+def stream_worker():
+
+    global streamer
+
+    if not TOKEN:
+        connection["status"] = "missing_token"
+        return
+
     while True:
-        if TOKEN:
-            for name in ("NIFTY", "BANKNIFTY"):
-                try:
-                    rows = build_rows(name, option_chain(TOKEN, name))
-                    with lock:
-                        latest[name] = rows[:100]
-                except Exception as e:
-                    with lock:
-                        errors.append(f"{name}: {e}")
-                        del errors[:-20]
-        time.sleep(POLL_SECONDS)
+
+        try:
+
+            keys = build_universe()
+
+            if not keys:
+                raise RuntimeError(
+                    "Upstox returned no option contracts."
+                )
+
+            streamer = make_streamer(
+                TOKEN
+            )
+
+            streamer.on(
+                "open",
+                on_open
+            )
+
+            streamer.on(
+                "message",
+                on_message
+            )
+
+            streamer.on(
+                "close",
+                on_close
+            )
+
+            streamer.on(
+                "error",
+                on_error
+            )
+
+            streamer.auto_reconnect(
+                True,
+                5,
+                20
+            )
+
+            connection["status"] = (
+                f"connecting ({len(keys)} contracts)"
+            )
+
+            streamer.subscribe(
+                keys,
+                "full"
+            )
+
+            streamer.connect()
+
+        except Exception as exc:
+
+            connection["status"] = "reconnecting"
+
+            add_error(exc)
+
+            time.sleep(10)
+
 
 @app.on_event("startup")
 def startup():
-    threading.Thread(target=worker, daemon=True).start()
+
+    threading.Thread(
+        target=stream_worker,
+        daemon=True
+    ).start()
+
 
 @app.get("/api/status")
 def status():
+
     with lock:
+
         return JSONResponse({
             "configured": bool(TOKEN),
-            "poll_seconds": POLL_SECONDS,
-            "nifty": latest["NIFTY"][:30],
-            "banknifty": latest["BANKNIFTY"][:30],
+
+            "connection": connection,
+
+            "nifty": latest["NIFTY"],
+
+            "banknifty": latest["BANKNIFTY"],
+
             "errors": errors[-5:],
+
+            "contracts": len(metadata),
+
+            "server_ts": time.time(),
         })
 
-@app.get("/", response_class=HTMLResponse)
+
+@app.get("/health")
+def health():
+
+    return {
+        "ok": True,
+
+        "configured": bool(TOKEN),
+
+        "connection":
+            connection["status"],
+
+        "contracts":
+            len(metadata),
+    }
+
+
+@app.get(
+    "/",
+    response_class=HTMLResponse
+)
 def home():
-    return HTMLResponse((Path(__file__).parent / "index.html").read_text(encoding="utf-8"))
+
+    with open(
+        "index.html",
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        return HTMLResponse(
+            f.read()
+        )
