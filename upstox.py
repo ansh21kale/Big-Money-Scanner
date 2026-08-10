@@ -1,4 +1,3 @@
-```python
 from __future__ import annotations
 
 import time
@@ -239,4 +238,4 @@ def make_streamer(
     streamer._authorized_feed_uri_created_at = time.time()
 
     return streamer
-```
+
