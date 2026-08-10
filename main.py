@@ -64,9 +64,7 @@ def extract_tick(feed):
     ltpc = full.get("ltpc") or {}
 
     level = full.get("marketLevel") or {}
-
     quotes = level.get("bidAskQuote") or []
-
     first = quotes[0] if quotes else {}
 
     greeks = full.get("optionGreeks") or {}
@@ -85,43 +83,19 @@ def extract_tick(feed):
     )
 
     return {
-        "ltp": float(
-            ltpc.get("ltp") or 0
-        ),
-
+        "ltp": float(ltpc.get("ltp") or 0),
         "volume": float(
             full.get("vtt")
             or daily.get("vol")
             or 0
         ),
-
-        "oi": float(
-            full.get("oi") or 0
-        ),
-
-        "bid": float(
-            first.get("bidP") or 0
-        ),
-
-        "ask": float(
-            first.get("askP") or 0
-        ),
-
-        "bid_qty": float(
-            first.get("bidQ") or 0
-        ),
-
-        "ask_qty": float(
-            first.get("askQ") or 0
-        ),
-
-        "delta": float(
-            greeks.get("delta") or 0
-        ),
-
-        "iv": float(
-            greeks.get("iv") or 0
-        ),
+        "oi": float(full.get("oi") or 0),
+        "bid": float(first.get("bidP") or 0),
+        "ask": float(first.get("askP") or 0),
+        "bid_qty": float(first.get("bidQ") or 0),
+        "ask_qty": float(first.get("askQ") or 0),
+        "delta": float(greeks.get("delta") or 0),
+        "iv": float(greeks.get("iv") or 0),
     }
 
 
@@ -132,7 +106,6 @@ def refresh():
     }
 
     with lock:
-
         for s in states.values():
 
             if s.ltp <= 0:
@@ -144,33 +117,22 @@ def refresh():
                     MIN_MONEY_CR
                 )
 
-                grouped[
-                    s.underlying
-                ].append(row)
+                grouped[s.underlying].append(row)
 
             except Exception as exc:
-                add_error(
-                    f"score: {exc}"
-                )
+                add_error(f"score: {exc}")
 
         for name in grouped:
 
             grouped[name].sort(
-                key=lambda x:
-                    x.get(
-                        "score",
-                        0
-                    ),
+                key=lambda x: x.get("score", 0),
                 reverse=True,
             )
 
-            latest[name] = (
-                grouped[name][:150]
-            )
+            latest[name] = grouped[name][:150]
 
 
 def on_message(message):
-
     if not isinstance(message, dict):
         return
 
@@ -180,15 +142,9 @@ def on_message(message):
     now = time.time()
 
     with lock:
+        connection["last_message"] = now
 
-        connection[
-            "last_message"
-        ] = now
-
-        feeds = (
-            message.get("feeds")
-            or {}
-        )
+        feeds = message.get("feeds") or {}
 
         for key, feed in feeds.items():
 
@@ -199,36 +155,20 @@ def on_message(message):
 
             tick = extract_tick(feed)
 
-            if not tick:
-                continue
-
-            if tick["ltp"] <= 0:
+            if not tick or tick["ltp"] <= 0:
                 continue
 
             s = states.get(key)
 
             if s is None:
-
                 s = ContractState(
                     instrument_key=key,
-                    underlying=meta[
-                        "underlying"
-                    ],
-                    strike=meta[
-                        "strike"
-                    ],
-                    side=meta[
-                        "side"
-                    ],
-                    expiry=meta[
-                        "expiry"
-                    ],
-                    prev_oi=meta[
-                        "prev_oi"
-                    ],
-                    close_price=meta[
-                        "close_price"
-                    ],
+                    underlying=meta["underlying"],
+                    strike=meta["strike"],
+                    side=meta["side"],
+                    expiry=meta["expiry"],
+                    prev_oi=meta["prev_oi"],
+                    close_price=meta["close_price"],
                 )
 
                 states[key] = s
@@ -242,7 +182,6 @@ def on_message(message):
 
 
 def on_open():
-
     global streamer
 
     connection["status"] = "connected"
@@ -257,7 +196,6 @@ def on_open():
         return
 
     try:
-
         streamer.subscribe(
             keys,
             "full"
@@ -269,39 +207,25 @@ def on_open():
         )
 
     except Exception as exc:
-
         connection["status"] = "subscription_error"
-
-        add_error(
-            f"subscribe: {exc}"
-        )
+        add_error(f"subscribe: {exc}")
 
 
-def on_close():
-
+def on_close(*args):
     connection["status"] = "closed"
 
 
 def on_error(err):
-
     connection["status"] = "error"
-
-    add_error(
-        f"websocket: {err}"
-    )
+    add_error(f"websocket: {err}")
 
 
 def build_universe():
-
     combined = {}
 
-    for name in (
-        "NIFTY",
-        "BANKNIFTY",
-    ):
+    for name in ("NIFTY", "BANKNIFTY"):
 
         try:
-
             chain = option_chain(
                 TOKEN,
                 name,
@@ -316,23 +240,18 @@ def build_universe():
             combined.update(meta)
 
         except Exception as exc:
-
             add_error(
                 f"{name} option chain: {exc}"
             )
 
-    if (
-        len(combined)
-        > MAX_CONTRACTS
-    ):
+    if len(combined) > MAX_CONTRACTS:
 
         keys = sorted(
             combined,
-            key=lambda k:
-                combined[k].get(
-                    "chain_volume",
-                    0
-                ),
+            key=lambda k: combined[k].get(
+                "chain_volume",
+                0
+            ),
             reverse=True,
         )[:MAX_CONTRACTS]
 
@@ -342,37 +261,26 @@ def build_universe():
         }
 
     with lock:
-
         metadata.clear()
-
-        metadata.update(
-            combined
-        )
+        metadata.update(combined)
 
     return list(combined)
 
 
 def stream_worker():
-
     global streamer
     global current_keys
 
     if not TOKEN:
-
-        connection[
-            "status"
-        ] = "missing_token"
-
+        connection["status"] = "missing_token"
         return
 
     while True:
 
         try:
-
             keys = build_universe()
 
             if not keys:
-
                 raise RuntimeError(
                     "Upstox returned no option contracts."
                 )
@@ -380,9 +288,7 @@ def stream_worker():
             with lock:
                 current_keys = list(keys)
 
-            streamer = make_streamer(
-                TOKEN
-            )
+            streamer = make_streamer(TOKEN)
 
             streamer.on(
                 "open",
@@ -406,7 +312,7 @@ def stream_worker():
 
             streamer.on(
                 "reconnecting",
-                lambda msg=None:
+                lambda *args:
                     connection.update(
                         status="reconnecting"
                     )
@@ -423,17 +329,11 @@ def stream_worker():
                 f"({len(keys)} contracts)"
             )
 
-            # IMPORTANT:
-            # Do NOT subscribe here.
-            # Subscription happens inside on_open().
-
             streamer.connect()
 
         except Exception as exc:
 
-            connection[
-                "status"
-            ] = "reconnecting"
+            connection["status"] = "reconnecting"
 
             add_error(
                 f"stream: {exc}"
@@ -444,7 +344,6 @@ def stream_worker():
 
 @app.on_event("startup")
 def startup():
-
     threading.Thread(
         target=stream_worker,
         daemon=True
@@ -453,64 +352,34 @@ def startup():
 
 @app.get("/api/status")
 def status():
-
     with lock:
-
         return JSONResponse({
-            "configured":
-                bool(TOKEN),
-
-            "connection":
-                dict(connection),
-
-            "nifty":
-                latest["NIFTY"],
-
-            "banknifty":
-                latest["BANKNIFTY"],
-
-            "errors":
-                errors[-5:],
-
-            "contracts":
-                len(metadata),
-
-            "server_ts":
-                time.time(),
+            "configured": bool(TOKEN),
+            "connection": dict(connection),
+            "nifty": latest["NIFTY"],
+            "banknifty": latest["BANKNIFTY"],
+            "errors": errors[-5:],
+            "contracts": len(metadata),
+            "server_ts": time.time(),
         })
 
 
 @app.get("/health")
 def health():
-
     with lock:
-
         return {
             "ok": True,
-
-            "configured":
-                bool(TOKEN),
-
-            "connection":
-                connection["status"],
-
-            "contracts":
-                len(metadata),
+            "configured": bool(TOKEN),
+            "connection": connection["status"],
+            "contracts": len(metadata),
         }
 
 
-@app.get(
-    "/",
-    response_class=HTMLResponse
-)
+@app.get("/", response_class=HTMLResponse)
 def home():
-
     with open(
         "index.html",
         "r",
         encoding="utf-8"
     ) as f:
-
-        return HTMLResponse(
-            f.read()
-    )
+        return HTMLResponse(f.read())
