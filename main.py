@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from .upstox import option_chain
-from .engine import Contract, score_contract
+from upstox import option_chain
+from engine import Contract, score_contract
 
 load_dotenv()
 
