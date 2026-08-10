@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 import requests
 import upstox_client
 
@@ -9,9 +8,6 @@ OPTION_CHAIN_URL = (
     "https://api.upstox.com/v2/option/chain"
 )
 
-MARKET_DATA_AUTHORIZE_URL = (
-    "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-)
 
 UNDERLYINGS = {
     "NIFTY": "NSE_INDEX|Nifty 50",
@@ -151,67 +147,9 @@ def build_contract_metadata(
     return contracts
 
 
-def authorize_market_feed(
-    access_token,
-):
-    """
-    Get a fresh one-time authorized
-    WebSocket redirect URI from Upstox.
-    """
-
-    response = requests.get(
-        MARKET_DATA_AUTHORIZE_URL,
-        headers={
-            "Accept":
-                "application/json",
-            "Authorization":
-                f"Bearer {access_token}",
-        },
-        timeout=20,
-    )
-
-    response.raise_for_status()
-
-    payload = response.json()
-
-    if payload.get("status") != "success":
-        raise RuntimeError(
-            f"Market feed authorization failed: "
-            f"{payload}"
-        )
-
-    uri = (
-        payload.get("data", {})
-        .get("authorized_redirect_uri")
-    )
-
-    if not uri:
-        raise RuntimeError(
-            "Upstox did not return "
-            "authorized_redirect_uri."
-        )
-
-    return uri
-
-
 def make_streamer(
     access_token
 ):
-    """
-    Create the official Upstox V3
-    MarketDataStreamer.
-
-    We first request a fresh authorized
-    feed URL so every connection attempt
-    gets a new one-time authorization.
-    """
-
-    # Fresh authorization request.
-    # The returned URI is one-time-use.
-    authorized_uri = authorize_market_feed(
-        access_token
-    )
-
     configuration = (
         upstox_client.Configuration()
     )
@@ -220,10 +158,7 @@ def make_streamer(
         access_token
     )
 
-    # Keep the URI available for diagnostics.
-    # The official SDK handles the V3
-    # websocket authentication itself.
-    streamer = (
+    return (
         upstox_client.MarketDataStreamerV3(
             upstox_client.ApiClient(
                 configuration
@@ -232,10 +167,3 @@ def make_streamer(
             "full",
         )
     )
-
-    # Store only non-sensitive information.
-    streamer._authorized_feed_ready = True
-    streamer._authorized_feed_uri_created_at = time.time()
-
-    return streamer
-
