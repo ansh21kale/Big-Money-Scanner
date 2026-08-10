@@ -276,7 +276,6 @@ def stream_worker():
         return
 
     while True:
-
         try:
             keys = build_universe()
 
@@ -310,19 +309,10 @@ def stream_worker():
                 on_error
             )
 
-            streamer.on(
-                "reconnecting",
-                lambda *args:
-                    connection.update(
-                        status="reconnecting"
-                    )
-            )
-
-            streamer.auto_reconnect(
-                True,
-                5,
-                20
-            )
+            # IMPORTANT:
+            # Do NOT enable SDK auto-reconnect.
+            # It can create repeated WebSocket
+            # handshakes and trigger 429 errors.
 
             connection["status"] = (
                 f"connecting "
@@ -332,15 +322,15 @@ def stream_worker():
             streamer.connect()
 
         except Exception as exc:
-
-            connection["status"] = "reconnecting"
+            connection["status"] = "error"
 
             add_error(
                 f"stream: {exc}"
             )
 
-            time.sleep(10)
-
+            # Long backoff after a failed handshake.
+            # Prevents rapid 429 retry loops.
+            time.sleep(60)
 
 @app.on_event("startup")
 def startup():
