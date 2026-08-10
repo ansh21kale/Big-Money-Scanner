@@ -4,7 +4,13 @@ import requests
 import upstox_client
 
 
-OPTION_CHAIN_URL = "https://api.upstox.com/v2/option/chain"
+OPTION_CHAIN_URL = (
+    "https://api.upstox.com/v2/option/chain"
+)
+
+AUTHORIZE_URL = (
+    "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+)
 
 
 UNDERLYINGS = {
@@ -13,10 +19,17 @@ UNDERLYINGS = {
 }
 
 
+def auth_headers(access_token):
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+    }
+
+
 def option_chain(
     access_token,
     underlying,
-    expiry="current_week"
+    expiry="current_week",
 ):
 
     if underlying not in UNDERLYINGS:
@@ -26,15 +39,10 @@ def option_chain(
 
     response = requests.get(
         OPTION_CHAIN_URL,
-        headers={
-            "Accept": "application/json",
-            "Authorization":
-                f"Bearer {access_token}",
-        },
+        headers=auth_headers(access_token),
         params={
             "instrument_key":
                 UNDERLYINGS[underlying],
-
             "expiry_date":
                 expiry,
         },
@@ -56,9 +64,44 @@ def option_chain(
     )
 
 
+def get_authorized_ws_url(
+    access_token
+):
+
+    response = requests.get(
+        AUTHORIZE_URL,
+        headers=auth_headers(access_token),
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
+    payload = response.json()
+
+    if payload.get("status") != "success":
+        raise RuntimeError(
+            f"WebSocket authorization failed: "
+            f"{payload}"
+        )
+
+    data = payload.get("data") or {}
+
+    url = data.get(
+        "authorized_redirect_uri"
+    )
+
+    if not url:
+        raise RuntimeError(
+            "Upstox did not return "
+            "authorized_redirect_uri"
+        )
+
+    return url
+
+
 def build_contract_metadata(
     data,
-    underlying
+    underlying,
 ):
 
     contracts = {}
@@ -68,7 +111,7 @@ def build_contract_metadata(
         strike = float(
             row.get(
                 "strike_price",
-                0
+                0,
             )
             or 0
         )
@@ -124,7 +167,7 @@ def build_contract_metadata(
                     float(
                         market_data.get(
                             "prev_oi",
-                            0
+                            0,
                         )
                         or 0
                     ),
@@ -133,7 +176,7 @@ def build_contract_metadata(
                     float(
                         market_data.get(
                             "close_price",
-                            0
+                            0,
                         )
                         or 0
                     ),
@@ -142,7 +185,7 @@ def build_contract_metadata(
                     float(
                         market_data.get(
                             "volume",
-                            0
+                            0,
                         )
                         or 0
                     ),
@@ -155,6 +198,12 @@ def make_streamer(
     access_token
 ):
 
+    # First obtain the authorized V3
+    # WebSocket URL.
+    ws_url = get_authorized_ws_url(
+        access_token
+    )
+
     configuration = (
         upstox_client.Configuration()
     )
@@ -163,12 +212,22 @@ def make_streamer(
         access_token
     )
 
-    return (
+    client = upstox_client.ApiClient(
+        configuration
+    )
+
+    streamer = (
         upstox_client.MarketDataStreamerV3(
-            upstox_client.ApiClient(
-                configuration
-            ),
+            client,
             [],
             "full",
         )
     )
+
+    # Store the authorized URL so that
+    # main.py can inspect it if required.
+    streamer.authorized_ws_url = (
+        ws_url
+    )
+
+    return streamer
